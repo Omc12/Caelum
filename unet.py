@@ -69,8 +69,6 @@ class LightUNet(nn.Module):
         u3 = torch.cat([u3, d1], dim=1)
         c3 = self.conv_up3(u3)
 
-        out = self.final_conv = nn.Sequential(
-            nn.Conv2d(64, 3, kernel_size=1),
-            nn.Tanh()
-        )
+        out = self.final_conv(c3)
+        out = torch.sigmoid(out)
         return out
