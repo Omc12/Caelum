@@ -32,7 +32,6 @@ class SkyEnhancementDataset(Dataset):
         # PyTorch requires tensors and specific normalizations
         self.transform = transforms.Compose([
             transforms.ToTensor(), # Converts 0-255 to 0.0-1.0
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
     def degrade_image(self, image):
@@ -58,15 +57,25 @@ class SkyEnhancementDataset(Dataset):
         img_path = self.filepaths[idx]
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # OpenCV loads BGR, we need RGB
-        
+    
         # Resize to fit our CNN (256x256)
         image = cv2.resize(image, (self.image_size, self.image_size))
         
         # Create the degraded version (Input)
         dull_image = self.degrade_image(image)
+
+        #-----HSV LOGIC-----
+        dull_float = dull_image.astype(np.float32)/255.0
+        perfect_float = image.astype(np.float32)/255.0
+
+        dull_hsv = cv2.cvtColor(dull_float, cv2.COLOR_RGB2HSV)
+        perfect_hsv = cv2.cvtColor(perfect_float, cv2.COLOR_RGB2HSV)
+
+        dull_hsv[:, :, 0] /= 360.0
+        perfect_hsv[:, :, 0] /= 360.0
         
         # Convert both to PyTorch Tensors
-        x_dull = self.transform(dull_image)
-        y_perfect = self.transform(image)
+        x_dull = torch.from_numpy(dull_hsv).permute(2, 0, 1)
+        y_perfect = torch.from_numpy(perfect_hsv).permute(2, 0, 1)
         
         return x_dull, y_perfect

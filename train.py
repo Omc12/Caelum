@@ -28,6 +28,11 @@ def train_model():
         persistent_workers=True if DEVICE == "cuda" else False
     )
 
+    def total_variation_loss(img):
+        tv_h = torch.mean(torch.abs(img[:, :, 1:, :] - img[:, :, :-1, :]))
+        tv_w = torch.mean(torch.abs(img[:, :, :, 1:] - img[:, :, :, :-1]))
+        return tv_h + tv_w
+
     # 2. Initialize Model, Loss, and Optimizer
     model = LightUNet().to(DEVICE)
     # Enable CUDA Benchmarking for faster convolution ops
@@ -52,7 +57,11 @@ def train_model():
 
             # Forward pass
             predictions = model(x_dull)
-            loss = criterion(predictions, y_perfect)
+            l1_loss = criterion(predictions, y_perfect)
+
+            tv_loss = total_variation_loss(predictions)
+
+            loss = l1_loss + (0.05 * tv_loss)
 
             # Backward pass
             optimizer.zero_grad()

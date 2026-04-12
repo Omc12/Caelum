@@ -27,19 +27,23 @@ def enhance_image(image_path, model_path):
 
     # Inference
     with torch.no_grad():
-        output = model(input_tensor)
+        output = torch.sigmoid(model(input_tensor))
 
     # Reverse the normalization to turn it back into a viewable image
-    output_img = output.squeeze().cpu().numpy()
-    output_img = np.transpose(output_img, (1, 2, 0))
-    output_img = (output_img * 0.5) + 0.5 # De-normalize
-    output_img = np.clip(output_img * 255, 0, 255).astype(np.uint8)
+    output_hsv = output.squeeze().cpu().numpy()
+    output_hsv = np.transpose(output_hsv, (1, 2, 0))
+
+    output_hsv[:, :, 0] *= 360.0
+
+    output_rgb = cv2.cvtColor(output_hsv, cv2.COLOR_HSV2RGB)
+
+    final_output = np.clip(output_rgb * 255, 0, 255).astype(np.uint8)
 
     # Resize back to original dimensions
-    final_output = cv2.resize(output_img, original_size)
+    final_output = cv2.resize(final_output, original_size)
     final_output = cv2.cvtColor(final_output, cv2.COLOR_RGB2BGR)
 
-    cv2.imwrite("enhanced_sky.jpg", final_output)
+    cv2.imwrite("enhanced_sky_hsv.jpg", final_output)
     print("Saved enhanced image to enhanced_sky.jpg")
 
 if __name__ == "__main__":
