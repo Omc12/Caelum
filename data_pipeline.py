@@ -7,6 +7,9 @@ import numpy as np
 import os
 from torchvision import transforms
 
+# Prevent OpenCV from hoarding CPU threads when used with PyTorch DataLoader
+cv2.setNumThreads(0)
+
 def download_open_images_sky(num_samples=5000):
     """Downloads sky images from Open Images V7."""
     print(f"Downloading {num_samples} Sky images. This might take a while...")
@@ -14,7 +17,7 @@ def download_open_images_sky(num_samples=5000):
         "open-images-v7",
         split="train",
         label_types=["classifications"],
-        classes=["Sky"],
+        classes=["Tree", "Skyscraper"],
         max_samples=num_samples,
         dataset_name="sky-dataset"
     )

@@ -43,6 +43,4 @@ def enhance_image(image_path, model_path):
     print("Saved enhanced image to enhanced_sky.jpg")
 
 if __name__ == "__main__":
-    # Replace with an image you want to test and your latest saved weights file
-    # enhance_image("my_dull_photo.jpg", "sky_unet_epoch_10.pth")
-    pass
+    enhance_image("sunset-background.webp", "checkpoints/sky_unet_epoch_10.pth")

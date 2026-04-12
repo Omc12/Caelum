@@ -18,21 +18,37 @@ def train_model():
     # 1. Prepare Data
     filepaths = download_open_images_sky(num_samples=5000)
     dataset = SkyEnhancementDataset(filepaths)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    # Added pin_memory=True for faster GPU transfer. Lower num_workers to 0 if lagging persists.
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=2, 
+        pin_memory=True if DEVICE == "cuda" else False,
+        persistent_workers=True if DEVICE == "cuda" else False
+    )
 
     # 2. Initialize Model, Loss, and Optimizer
     model = LightUNet().to(DEVICE)
+    # Enable CUDA Benchmarking for faster convolution ops
+    if DEVICE == "cuda":
+        torch.backends.cudnn.benchmark = True
+        
     criterion = nn.L1Loss() # L1 Loss prevents blurry outputs
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     # 3. Training Loop
+    import os
+    os.makedirs("checkpoints", exist_ok=True)
+    
     for epoch in range(EPOCHS):
         model.train()
         loop = tqdm(dataloader, leave=True)
         epoch_loss = 0
 
         for x_dull, y_perfect in loop:
-            x_dull, y_perfect = x_dull.to(DEVICE), y_perfect.to(DEVICE)
+            # non_blocking=True helps speed up host-to-device transfers
+            x_dull, y_perfect = x_dull.to(DEVICE, non_blocking=True), y_perfect.to(DEVICE, non_blocking=True)
 
             # Forward pass
             predictions = model(x_dull)
@@ -50,10 +66,11 @@ def train_model():
 
         print(f"Epoch {epoch+1} Average Loss: {epoch_loss/len(dataloader):.4f}")
         
-        # Save checkpoint
-        torch.save(model.state_dict(), f"sky_unet_epoch_{epoch+1}.pth")
+        # Save checkpoint to the checkpoints folder
+        checkpoint_path = os.path.join("checkpoints", f"sky_unet_epoch_{epoch+1}.pth")
+        torch.save(model.state_dict(), checkpoint_path)
 
-    print("Training Complete. Final model saved.")
+    print("Training Complete. Final model saved to checkpoints/ folder.")
 
 if __name__ == "__main__":
     train_model()
