@@ -8,10 +8,11 @@ from tqdm import tqdm
 import os
 
 # ── Hyperparameters ──────────────────────────────────────────
-BATCH_SIZE    = 16
+BATCH_SIZE    = 8        # reduced from 16 — 512px images are 4x larger in memory
 EPOCHS        = 30
 LEARNING_RATE = 1e-4
 NUM_IMAGES    = 8000
+IMAGE_SIZE    = 512      # was 256 — higher res = less upscale blur and grain
 IMAGE_DIR     = "sky_images"
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 # ─────────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ def train_model():
     if len(filepaths) == 0:
         raise RuntimeError("No images found! Check your Pexels API key.")
 
-    full_dataset = SkyEnhancementDataset(filepaths)
+    full_dataset = SkyEnhancementDataset(filepaths, image_size=IMAGE_SIZE)
     val_size     = max(1, int(0.1 * len(full_dataset)))
     train_size   = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])

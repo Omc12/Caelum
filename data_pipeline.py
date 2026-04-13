@@ -101,7 +101,7 @@ def load_local_sky_images(image_dir="sky_images"):
 
 
 class SkyEnhancementDataset(Dataset):
-    def __init__(self, filepaths, image_size=256):
+    def __init__(self, filepaths, image_size=512):
         self.filepaths  = self._validate_files(filepaths)
         self.image_size = image_size
         print(f"Dataset ready: {len(self.filepaths)} valid images")
@@ -143,6 +143,44 @@ class SkyEnhancementDataset(Dataset):
         if np.random.rand() > 0.6:
             k = np.random.choice([3, 5])
             degraded = cv2.GaussianBlur(degraded, (k, k), 0)
+
+        # ── Noise augmentation (NEW) ──────────────────────────────────────────
+        # Simulates real sensor noise from phone cameras in low-light / hazy
+        # conditions. Training with noisy inputs teaches the model to suppress
+        # grain rather than amplify it (which is what caused the visible texture
+        # artifact in the enhanced output).
+        #
+        # Three noise types, each applied randomly and independently:
+        #
+        #   1. Gaussian noise  — continuous sensor readout noise (most common)
+        #   2. Poisson noise   — shot noise from low photon count (dim skies)
+        #   3. JPEG artefacts  — compression ringing along cloud edges
+        #
+        # Applied only to the DULL image; the clean target is untouched.
+        noise_type = np.random.choice(["gaussian", "poisson", "jpeg", "none"],
+                                      p=[0.40, 0.20, 0.20, 0.20])
+
+        if noise_type == "gaussian":
+            sigma = np.random.uniform(2, 10)          # std in [0,255] space
+            noise = np.random.normal(0, sigma, degraded.shape).astype(np.float32)
+            degraded = np.clip(degraded.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+        elif noise_type == "poisson":
+            # Scale to [0,1], add Poisson, scale back
+            scale   = np.random.uniform(0.03, 0.10)
+            img_f   = degraded.astype(np.float32) / 255.0
+            noisy   = np.random.poisson(img_f / scale) * scale
+            degraded = np.clip(noisy * 255.0, 0, 255).astype(np.uint8)
+
+        elif noise_type == "jpeg":
+            quality  = np.random.randint(30, 70)      # low quality → blocky artefacts
+            encode_param = [cv2.IMWRITE_JPEG_QUALITY, quality]
+            _, enc   = cv2.imencode(".jpg",
+                                    cv2.cvtColor(degraded, cv2.COLOR_RGB2BGR),
+                                    encode_param)
+            degraded = cv2.cvtColor(cv2.imdecode(enc, cv2.IMREAD_COLOR),
+                                    cv2.COLOR_BGR2RGB)
+        # "none" → no noise added (keeps ~20% of samples clean for stability)
 
         return degraded
 

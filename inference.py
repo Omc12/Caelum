@@ -23,7 +23,7 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
     original_size = (img.shape[1], img.shape[0])
 
     # ── Preprocess (must exactly match data_pipeline.py) ─────────────────────
-    img_resized = cv2.resize(img, (256, 256))
+    img_resized = cv2.resize(img, (512, 512))
     lab = cv2.cvtColor(img_resized, cv2.COLOR_RGB2LAB).astype(np.float32)
     lab /= 255.0
 
@@ -44,16 +44,25 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
 
     # ── Gentle post-processing ────────────────────────────────────────────────
 
-    # 1. Mild unsharp mask to recover sharpness lost at 256px processing.
-    #    OLD: addWeighted(output, 1.4, blurred, -0.4, 0)  ← far too aggressive
-    #    NEW: 1.15 / -0.15 — subtle crispness only.
+    # 1. Denoise BEFORE sharpening.
+    #    The model can introduce subtle high-frequency noise (visible as grain
+    #    in flat sky regions). Denoising first prevents the unsharp mask from
+    #    amplifying that noise into visible texture.
+    #    h=5 / hColor=5 are conservative — removes grain without smearing edges.
+    output_rgb = cv2.fastNlMeansDenoisingColored(output_rgb, None,
+                                                  h=5, hColor=5,
+                                                  templateWindowSize=7,
+                                                  searchWindowSize=21)
+
+    # 2. Mild unsharp mask to recover sharpness lost at 256px processing.
+    #    Applied AFTER denoise so we sharpen real edges, not noise.
     blurred    = cv2.GaussianBlur(output_rgb, (0, 0), 2)
     output_rgb = cv2.addWeighted(output_rgb, 1.15, blurred, -0.15, 0)
 
-    # 2. Safety clamp after unsharp mask
+    # 3. Safety clamp after unsharp mask
     output_rgb = np.clip(output_rgb, 0, 255).astype(np.uint8)
 
-    # 3. Gentle colour grading: very small S-curve via LUT on the L channel.
+    # 4. Gentle colour grading: very small S-curve via LUT on the L channel.
     #    Lifts shadows slightly and adds micro-contrast without blowing highlights.
     output_lab2 = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2LAB)
     l, a, b     = cv2.split(output_lab2)
@@ -64,7 +73,7 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
     l          = cv2.LUT(l, lut)
     output_rgb = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2RGB)
 
-    # 4. Blend 85% enhanced + 15% original to guard against any remaining
+    # 5. Blend 85% enhanced + 15% original to guard against any remaining
     #    colour cast — ensures the output is always at least as good as input.
     img_original_resized = cv2.resize(
         cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB),
@@ -82,4 +91,4 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
 
 
 if __name__ == "__main__":
-    enhance_image("pexels-ian-panelo-7538388.jpg", "checkpoints/sky_unet_best.pth")
+    enhance_image("sunset-background.webp", "checkpoints/sky_unet_best.pth")
