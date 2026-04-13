@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+.venv/
+
+# Images
+sky_images/
+*.jpg
+*.webp
+*.png
+*.jpeg
+enhanced_sky*.jpg
+sunset-background*.webp
+
+# Model Checkpoints
+checkpoints/*.pth
