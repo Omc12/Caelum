@@ -102,7 +102,7 @@ class LightUNet(nn.Module):
         # tanh outputs in [-1, 1]; we scale to a small range so the
         # residual nudges the image rather than replacing it.
         self.final_conv = nn.Conv2d(64, 3, kernel_size=1)
-        self.delta_scale = 0.3   # max ± boost per channel (tunable)
+        self.delta_scale = 0.15   # Capped to 0.15 (was 0.3) to heavily prevent oversaturation and artificial colors
 
     def forward(self, x):
         # ── Encoder ──

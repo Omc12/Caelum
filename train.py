@@ -8,13 +8,15 @@ from tqdm import tqdm
 import os
 
 # ── Hyperparameters ──────────────────────────────────────────
-BATCH_SIZE    = 12       # safe for 4070 Super 12GB at 512px with AMP
-EPOCHS        = 30
-LEARNING_RATE = 1e-4
-NUM_IMAGES    = 8000
-IMAGE_SIZE    = 512      # was 256 — higher res = less upscale blur and grain
-IMAGE_DIR     = "sky_images"
-DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE          = 32       # large batch fine at 256px
+EPOCHS              = 200
+EARLY_STOP_PATIENCE = 15       # Stop training if validation loss doesn't improve for this many epochs
+LEARNING_RATE       = 1e-4
+NUM_IMAGES          = 8000
+IMAGE_SIZE          = 256      # fast — upgrade to 512 only after confirming quality
+IMAGE_DIR           = "sky_images"
+DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_WORKERS         = 0        # Windows: spawning workers is slower than main process
 # ─────────────────────────────────────────────────────────────
 
 
@@ -25,16 +27,10 @@ def total_variation_loss(img):
 
 
 def ssim_loss(pred, target, window_size=11):
-    """
-    Structural Similarity loss — penalises blurry/flat outputs and
-    preserves fine cloud texture.
-    """
     C1, C2 = 0.01 ** 2, 0.03 ** 2
     mu_p  = torch.nn.functional.avg_pool2d(pred,   window_size, 1, window_size // 2)
     mu_t  = torch.nn.functional.avg_pool2d(target, window_size, 1, window_size // 2)
-    mu_p2 = mu_p * mu_p
-    mu_t2 = mu_t * mu_t
-    mu_pt = mu_p * mu_t
+    mu_p2, mu_t2, mu_pt = mu_p * mu_p, mu_t * mu_t, mu_p * mu_t
 
     sigma_p2 = torch.nn.functional.avg_pool2d(pred   * pred,   window_size, 1, window_size // 2) - mu_p2
     sigma_t2 = torch.nn.functional.avg_pool2d(target * target, window_size, 1, window_size // 2) - mu_t2
@@ -46,25 +42,10 @@ def ssim_loss(pred, target, window_size=11):
 
 
 def saturation_reg_loss(pred, target):
-    """
-    NEW — Saturation regularisation.
-
-    In OpenCV LAB (normalised to [0,1]):
-      • Channel 0 = L (lightness)
-      • Channels 1 & 2 = A and B (colour opponents); neutral = 128/255 ≈ 0.502
-
-    Chroma ≈ sqrt((A - 0.5)² + (B - 0.5)²)
-
-    This loss penalises the model if its predicted chroma is significantly
-    higher than the ground-truth chroma, directly preventing over-saturation.
-    It is asymmetric: only the excess is penalised, not under-saturation.
-    """
-    neutral = 0.502  # 128 / 255
-    pred_chroma   = torch.sqrt((pred[:, 1] - neutral) ** 2 + (pred[:, 2] - neutral) ** 2 + 1e-6)
+    neutral       = 0.502
+    pred_chroma   = torch.sqrt((pred[:, 1]   - neutral) ** 2 + (pred[:, 2]   - neutral) ** 2 + 1e-6)
     target_chroma = torch.sqrt((target[:, 1] - neutral) ** 2 + (target[:, 2] - neutral) ** 2 + 1e-6)
-    # Penalise only over-saturation (pred chroma > target chroma)
-    excess = torch.clamp(pred_chroma - target_chroma, min=0)
-    return excess.mean()
+    return torch.clamp(pred_chroma - target_chroma, min=0).mean()
 
 
 def combined_loss(pred, target):
@@ -72,12 +53,8 @@ def combined_loss(pred, target):
     ssim = ssim_loss(pred, target)
     tv   = total_variation_loss(pred)
     sat  = saturation_reg_loss(pred, target)
-
-    # L1        → colour accuracy
-    # SSIM      → cloud structure / smooth gradients
-    # TV        → prevent noisy/pixelated output
-    # sat_reg   → prevent over-saturation blowout   ← NEW
-    return l1 + (0.5 * ssim) + (0.05 * tv) + (0.2 * sat)
+    # Increased TV loss for better smoothness (anti-grain) during training
+    return l1 + (1.0 * ssim) + (0.5 * tv) + (0.5 * sat)
 
 
 def train_model():
@@ -93,50 +70,42 @@ def train_model():
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
     print(f"Train: {train_size} | Val: {val_size}")
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=2, pin_memory=(DEVICE == "cuda"),
-        persistent_workers=(DEVICE == "cuda")
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=2, pin_memory=(DEVICE == "cuda"),
-        persistent_workers=(DEVICE == "cuda")
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
+                              shuffle=True,  num_workers=NUM_WORKERS,
+                              pin_memory=(DEVICE == "cuda"))
+    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE,
+                              shuffle=False, num_workers=NUM_WORKERS,
+                              pin_memory=(DEVICE == "cuda"))
 
     model     = LightUNet().to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=4, factor=0.5, verbose=True
-    )
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min",
+                                                      patience=4, factor=0.5)
+    scaler    = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
 
     if DEVICE == "cuda":
         torch.backends.cudnn.benchmark = True
 
-    # Automatic Mixed Precision — uses float16 for most ops on the 4070 Super,
-    # giving ~40-50% faster training with no quality loss.
-    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-
     os.makedirs("checkpoints", exist_ok=True)
     best_val_loss = float("inf")
+    early_stop_counter = 0
 
     for epoch in range(EPOCHS):
         # ── Train ──
         model.train()
         train_loss = 0
-        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{EPOCHS}] Train", leave=False)
+        loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{EPOCHS}]", leave=False)
 
         for x_dull, y_perfect in loop:
             x_dull    = x_dull.to(DEVICE, non_blocking=True)
             y_perfect = y_perfect.to(DEVICE, non_blocking=True)
 
-            # AMP autocast: runs forward pass in float16 where safe
             with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
                 predictions = model(x_dull)
                 loss        = combined_loss(predictions, y_perfect)
 
             optimizer.zero_grad()
-            scaler.scale(loss).backward()   # scaled gradients avoid float16 underflow
+            scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
@@ -156,15 +125,28 @@ def train_model():
                     val_loss += combined_loss(model(x_dull), y_perfect).item()
 
         avg_val = val_loss / len(val_loader)
+
+        prev_lr = optimizer.param_groups[0]["lr"]
         scheduler.step(avg_val)
+        new_lr  = optimizer.param_groups[0]["lr"]
+        if new_lr != prev_lr:
+            print(f"  ↓ LR reduced: {prev_lr:.2e} → {new_lr:.2e}")
 
         print(f"Epoch {epoch+1:02d}/{EPOCHS} | Train: {avg_train:.4f} | Val: {avg_val:.4f}")
         torch.save(model.state_dict(), f"checkpoints/sky_unet_epoch_{epoch+1}.pth")
 
         if avg_val < best_val_loss:
             best_val_loss = avg_val
+            early_stop_counter = 0
             torch.save(model.state_dict(), "checkpoints/sky_unet_best.pth")
             print(f"  ✓ Best model saved (val: {best_val_loss:.4f})")
+        else:
+            early_stop_counter += 1
+            print(f"  - No improvement in validation loss for {early_stop_counter} epoch(s)")
+
+        if early_stop_counter >= EARLY_STOP_PATIENCE:
+            print(f"\n[!] Early stopping triggered. Validation loss hasn't improved for {EARLY_STOP_PATIENCE} epochs.")
+            break
 
     print(f"\nDone! Best val loss: {best_val_loss:.4f}")
     print("Best model → checkpoints/sky_unet_best.pth")

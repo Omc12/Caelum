@@ -22,8 +22,26 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     original_size = (img.shape[1], img.shape[0])
 
-    # ── Preprocess (must exactly match data_pipeline.py) ─────────────────────
-    img_resized = cv2.resize(img, (512, 512))
+    # ── Preprocess ────────────────────────────────────────────────────────────
+    # The model is fully convolutional, so we can process at varied resolutions.
+    # However, very large images will cause Out Of Memory (OOM) errors.
+    # We cap the maximum processing dimension to prevent this.
+    h, w, _ = img.shape
+    max_dim = 1536  # Safe maximum for most mid-range/high-end GPUs
+    
+    scale = 1.0
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    
+    # Ensure dimensions are multiples of 16 (due to 4 MaxPool layers).
+    new_w = (new_w // 16) * 16
+    new_h = (new_h // 16) * 16
+    
+    img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+
     lab = cv2.cvtColor(img_resized, cv2.COLOR_RGB2LAB).astype(np.float32)
     lab /= 255.0
 
@@ -31,7 +49,12 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
 
     # ── Inference ─────────────────────────────────────────────────────────────
     with torch.no_grad():
-        output = model(input_tensor)
+        with torch.autocast(device_type=device if device == "cuda" else "cpu", enabled=(device == "cuda")):
+            output = model(input_tensor)
+
+    # Free up memory immediately after inference
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     # ── Postprocess ───────────────────────────────────────────────────────────
     output_lab = output.squeeze().cpu().numpy().transpose(1, 2, 0)
@@ -39,47 +62,26 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
 
     output_rgb = cv2.cvtColor(output_lab, cv2.COLOR_LAB2RGB)
 
-    # Resize back to original resolution using high-quality Lanczos
+    # Resize back to exact original resolution
     output_rgb = cv2.resize(output_rgb, original_size, interpolation=cv2.INTER_LANCZOS4)
 
     # ── Gentle post-processing ────────────────────────────────────────────────
 
-    # 1. Denoise BEFORE sharpening.
-    #    The model can introduce subtle high-frequency noise (visible as grain
-    #    in flat sky regions). Denoising first prevents the unsharp mask from
-    #    amplifying that noise into visible texture.
-    #    h=5 / hColor=5 are conservative — removes grain without smearing edges.
+    # 1. Denoise with stronger settings to remove more noise/grain
     output_rgb = cv2.fastNlMeansDenoisingColored(output_rgb, None,
-                                                  h=5, hColor=5,
+                                                  h=10, hColor=10,
                                                   templateWindowSize=7,
                                                   searchWindowSize=21)
 
-    # 2. Mild unsharp mask to recover sharpness lost at 256px processing.
-    #    Applied AFTER denoise so we sharpen real edges, not noise.
-    blurred    = cv2.GaussianBlur(output_rgb, (0, 0), 2)
-    output_rgb = cv2.addWeighted(output_rgb, 1.15, blurred, -0.15, 0)
-
-    # 3. Safety clamp after unsharp mask
+    # 2. Safety clamp
     output_rgb = np.clip(output_rgb, 0, 255).astype(np.uint8)
 
-    # 4. Gentle colour grading: very small S-curve via LUT on the L channel.
-    #    Lifts shadows slightly and adds micro-contrast without blowing highlights.
-    output_lab2 = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2LAB)
-    l, a, b     = cv2.split(output_lab2)
-    lut         = np.array([
-        int(np.clip(i + 6 * np.sin(np.pi * i / 255.0), 0, 255))
-        for i in range(256)
-    ], dtype=np.uint8)
-    l          = cv2.LUT(l, lut)
-    output_rgb = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2RGB)
-
-    # 5. Blend 85% enhanced + 15% original to guard against any remaining
-    #    colour cast — ensures the output is always at least as good as input.
+    # 3. Blend 80% enhanced + 20% original to ground the colours and prevent oversaturation.
     img_original_resized = cv2.resize(
         cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB),
         original_size, interpolation=cv2.INTER_LANCZOS4
     )
-    output_rgb = cv2.addWeighted(output_rgb, 0.85, img_original_resized, 0.15, 0)
+    output_rgb = cv2.addWeighted(output_rgb, 0.80, img_original_resized, 0.20, 0)
 
     # ── Save ──────────────────────────────────────────────────────────────────
     final_output = np.clip(output_rgb, 0, 255).astype(np.uint8)
@@ -91,4 +93,4 @@ def enhance_image(image_path, model_path="checkpoints/sky_unet_best.pth", output
 
 
 if __name__ == "__main__":
-    enhance_image("sunset-background.webp", "checkpoints/sky_unet_best.pth")
+    enhance_image("samples\pexels-ian-panelo-7538388.jpg", "checkpoints/sky_unet_best.pth")
