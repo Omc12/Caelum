@@ -131,6 +131,6 @@ class LightUNet(nn.Module):
         u4 = torch.cat([u4, self.att4(u4, d1)], dim=1)
         u4 = self.conv_up4(u4)
 
-        # Residual delta clamped to ±delta_scale, then added to input
-        delta = torch.tanh(self.final_conv(u4)) * self.delta_scale
-        return torch.clamp(x + delta, 0.0, 1.0)
+        # Standard UNet output to allow the model to completely redraw/denoise
+        # instead of passing input noise through a residual connection
+        return torch.sigmoid(self.final_conv(u4))
